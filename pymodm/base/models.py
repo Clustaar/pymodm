@@ -26,6 +26,7 @@ from pymodm.context_managers import no_auto_dereference
 from pymodm.errors import ValidationError, InvalidModel, OperationError
 from pymodm.fields import ObjectIdField
 from pymodm.manager import Manager
+from pymodm.mutations import MutationsTracker
 
 
 __all__ = ['MongoModel', 'EmbeddedMongoModel']
@@ -190,6 +191,9 @@ class MongoModelBase(object):
         # Initialize dict for saving field default values.
         self._defaults = {}
 
+        self._mutations = MutationsTracker()
+        self._fetched_from_db = kwargs.pop("_fetched_from_db", False)
+
         # Turn ordered arguments into keyword arguments.
         if args:
             len_args = len(args)
@@ -243,6 +247,7 @@ class MongoModelBase(object):
         """Set this object's attributes from a dict."""
         self._data.clear()
         self._defaults.clear()
+        self._mutations.reset()
         field_names = {
             field.mongo_name: field.attname
             for field in self._mongometa.get_fields()
@@ -260,7 +265,7 @@ class MongoModelBase(object):
                     'Unrecognized field name %r' % field)
 
     @classmethod
-    def from_document(cls, document):
+    def from_document(cls, document, fetched_from_db=True):
         """Construct an instance of this class from the given document.
 
         :parameters:
@@ -268,6 +273,7 @@ class MongoModelBase(object):
             Keys within the document must be named according to each model
             field's `mongo_name` attribute, rather than the field's Python
             name.
+          - `fetched_from_db`: was the document fetched from database ?
 
         """
         dct = validate_mapping('document', document)
@@ -280,7 +286,7 @@ class MongoModelBase(object):
                                 'a subclass of the %s, but %s is not.'
                                 % (doc_cls, cls))
 
-        inst = doc_cls()
+        inst = doc_cls(_fetched_from_db=fetched_from_db)
         inst._set_attributes(dct)
         return inst
 
@@ -376,6 +382,26 @@ class MongoModelBase(object):
             self.clean_fields(exclude=exclude)
         self.clean()
 
+    def set_value(self, field, value):
+        """Changes value of field in _data and mark it as dirty.
+
+        :parameters:
+          - `field`: field to update
+          - `value`: new value
+        """
+        self._data[field.attname] = value
+        self._mutations.track_set(field, value)
+
+    def unset_value(self, field):
+        """Unset value of field in and mark it as dirty.
+
+        :parameters:
+          - `field`: field to unset
+        """
+        self._data.pop(field.attname, None)
+        self._defaults.pop(field.attname, None)
+        self._mutations.track_unset(field)
+
     def __iter__(self):
         return iter(self._data)
 
@@ -430,7 +456,7 @@ class TopLevelMongoModel(MongoModelBase):
                 {'_id': self._mongometa.pk.to_mongo(self.pk)})
         return self.__queryset
 
-    def save(self, cascade=None, full_clean=True, force_insert=False):
+    def save(self, cascade=None, full_clean=True, force_insert=False, replace=False):
         """Save this document into MongoDB.
 
         If there is no value for the primary key on this Model instance, the
@@ -455,6 +481,9 @@ class TopLevelMongoModel(MongoModelBase):
         cascade = validate_boolean_or_none('cascade', cascade)
         full_clean = validate_boolean('full_clean', full_clean)
         force_insert = validate_boolean('force_insert', force_insert)
+        replace = validate_boolean('replace', replace)
+
+        pk_defined = not self._mongometa.pk.is_undefined(self)
         if full_clean:
             self.full_clean()
         if cascade or (self._mongometa.cascade and cascade is not False):
@@ -462,13 +491,22 @@ class TopLevelMongoModel(MongoModelBase):
                 for referenced_object in self._find_referenced_objects(
                         getattr(self, field_name)):
                     referenced_object.save()
-        if force_insert or self._mongometa.pk.is_undefined(self):
+        if force_insert or not pk_defined:
             result = self._mongometa.collection.insert_one(self.to_son())
             self.pk = result.inserted_id
+        elif self._fetched_from_db and pk_defined and not replace:
+            operations = self._mutations.get_operations()
+            result = self._mongometa.collection.update_one(
+                {'_id': self._mongometa.pk.to_mongo(self.pk)},
+                operations, upsert=True)
         else:
-            result = self._mongometa.collection.replace_one(
+            self._mongometa.collection.replace_one(
                 {'_id': self._mongometa.pk.to_mongo(self.pk)},
                 self.to_son(), upsert=True)
+
+        self._mutations.reset()
+        self._fetched_from_db = True
+
         return self
 
     def delete(self):

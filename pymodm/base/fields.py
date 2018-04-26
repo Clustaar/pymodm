@@ -94,11 +94,10 @@ class MongoBaseField(object):
         return self
 
     def __set__(self, inst, value):
-        inst._data[self.attname] = value
+        inst.set_value(self, value)
 
     def __delete__(self, inst):
-        inst._data.pop(self.attname, None)
-        inst._defaults.pop(self.attname, None)
+        inst.unset_value(self)
 
     def get_default(self):
         return self.default() if callable(self.default) else self.default

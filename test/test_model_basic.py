@@ -15,6 +15,8 @@
 from test import ODMTestCase, DB
 from test.models import User
 
+from mock import patch
+
 from pymodm import MongoModel, CharField, IntegerField
 from pymodm.errors import InvalidModel, ValidationError
 
@@ -118,3 +120,35 @@ class BasicModelTestCase(ODMTestCase):
 
         retrieved.save()
         self.assertNotIn('age', DB.document.find_one())
+
+    def test_set_value(self):
+        user = User()
+        user.set_value(User.fname, 'john')
+        self.assertEqual(user.fname, 'john')
+
+    def test_set_value_tracks_a_mutation(self):
+        user = User()
+        user.set_value(User.lname, 'john')
+        operations = user._mutations.get_operations()
+        self.assertEqual(operations, {'$set': {'lname': 'john'}})
+
+    def test_unsert_value(self):
+        user = User(fname='john')
+        user.unset_value(User.fname)
+        self.assertIsNone(user.fname)
+
+    def test_unsert_value_tracks_a_mutation(self):
+        user = User()
+        user.unset_value(User.lname)
+        operations = user._mutations.get_operations()
+        self.assertEqual(operations, {'$unset': {'lname': ''}})
+
+    def test_save_with_update(self):
+        user = User(fname='John')
+        user.save()
+        collection = user._mongometa.collection
+        with patch.object(collection, 'update_one') as update_one:
+            user.lname = 'Doe'
+            user.save()
+
+            update_one.assert_called_once_with()
